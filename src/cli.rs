@@ -20,6 +20,11 @@ pub fn render_status(status: &RecorderStatus) -> String {
             "allowed_apps: {}\n",
             "session_events: {}\n",
             "session_path: {}\n",
+            "indexed_sessions: {}\n",
+            "last_session_path: {}\n",
+            "last_session_id: {}\n",
+            "last_session_profile: {}\n",
+            "last_session_events: {}\n",
         ),
         render_state(status.state),
         status.session_id,
@@ -41,6 +46,11 @@ pub fn render_status(status: &RecorderStatus) -> String {
         status.allowed_app_count,
         status.session_event_count,
         render_session_path(status.session_path.as_deref()),
+        status.indexed_session_count,
+        render_session_path(status.last_persisted_session_path.as_deref()),
+        render_last_session_id(status.last_session_summary.as_ref()),
+        render_last_session_profile(status.last_session_summary.as_ref()),
+        render_last_session_events(status.last_session_summary.as_ref()),
     );
 
     if let Some(issue) = status.pending_issue {
@@ -62,6 +72,27 @@ fn render_session_path(path: Option<&std::path::Path>) -> String {
     match path {
         Some(path) => path.display().to_string(),
         None => "unwritten".to_string(),
+    }
+}
+
+fn render_last_session_id(summary: Option<&crate::storage::SessionFileSummary>) -> String {
+    match summary {
+        Some(summary) => summary.session_id.clone(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn render_last_session_profile(summary: Option<&crate::storage::SessionFileSummary>) -> String {
+    match summary {
+        Some(summary) => summary.profile_name.clone(),
+        None => "unknown".to_string(),
+    }
+}
+
+fn render_last_session_events(summary: Option<&crate::storage::SessionFileSummary>) -> usize {
+    match summary {
+        Some(summary) => summary.event_count,
+        None => 0,
     }
 }
 
@@ -97,6 +128,7 @@ mod tests {
         assert!(output.contains("session_events: 0"));
         assert!(output.contains("capture_backend: stub-capture"));
         assert!(output.contains("session_path: unwritten"));
+        assert!(output.contains("last_session_id: unknown"));
         assert!(output.contains("warning:"));
     }
 }

@@ -25,6 +25,10 @@ fn main() {
     };
     let mut recorder = Recorder::new(config);
     let session_root = Path::new("data").join("sessions");
+    if let Err(error) = recorder.load_storage_state(&session_root) {
+        eprintln!("storage state error: {:?}", error);
+        std::process::exit(5);
+    }
 
     match command {
         Command::Start => {
@@ -40,6 +44,12 @@ fn main() {
         }
         Command::Status => {}
         Command::Stop => {
+            if let Ok(Some(entry)) = recorder.last_indexed_session(&session_root) {
+                eprintln!(
+                    "last indexed session: {} ({})",
+                    entry.session_id, entry.file_name
+                );
+            }
             recorder.stop();
             if recorder.has_session_data() {
                 if let Err(error) = recorder.persist_session(&session_root) {

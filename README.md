@@ -96,6 +96,11 @@ The binary is currently structured to accept a small set of configuration flags 
 
 The current startup path validates unsafe combinations before recording begins. For example, `full-replay` requires explicit acknowledgement, and `focus` mode requires some scoping rule.
 
+Session logs are currently written under `data/sessions/`. The storage layer also maintains:
+
+- `session-index.log`: append-only summary of persisted sessions
+- `last-session.txt`: pointer to the most recently persisted session file
+
 ## Safety Boundary
 
 This project must not behave like spyware, a stealth recorder, or a keylogger. If a proposed feature creates that ambiguity, it should be redesigned.

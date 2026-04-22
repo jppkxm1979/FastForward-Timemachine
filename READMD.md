@@ -44,3 +44,4 @@ FastForward-Timemachine is a local-only activity replay engine focused on transp
 - Timeline sessions can now render to simple log lines for a future storage layer
 - Session events now use a monotonic elapsed clock and can be written under `data/sessions/`
 - Session files now carry explicit session IDs instead of profile-only filenames
+- Storage now tracks a session index and a last-session pointer for cross-run continuity

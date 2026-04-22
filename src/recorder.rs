@@ -2,7 +2,11 @@ use crate::capture::{CaptureBackend, CapturePlan, StubCaptureBackend};
 use crate::clock::SessionClock;
 use crate::config::{AppConfig, ConfigValidationError, RecordingPlan, RecordingProfile};
 use crate::process::{ProcessBackend, ProcessTrackingPlan, StubProcessBackend};
-use crate::storage::{SessionManifest, TimelineEvent, TimelineEventKind};
+use crate::storage::{
+    append_session_index, read_last_session_pointer, read_session_index, write_last_session_pointer,
+    read_session_file_summary, SessionFileSummary, SessionIndexEntry, SessionManifest,
+    TimelineEvent, TimelineEventKind,
+};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -31,6 +35,9 @@ pub struct RecorderStatus {
     pub capture_backend: &'static str,
     pub process_backend: &'static str,
     pub session_path: Option<PathBuf>,
+    pub indexed_session_count: usize,
+    pub last_persisted_session_path: Option<PathBuf>,
+    pub last_session_summary: Option<SessionFileSummary>,
 }
 
 #[derive(Debug, Clone)]
@@ -42,6 +49,9 @@ pub struct Recorder {
     process_plan: ProcessTrackingPlan,
     clock: SessionClock,
     session_path: Option<PathBuf>,
+    indexed_session_count: usize,
+    last_persisted_session_path: Option<PathBuf>,
+    last_session_summary: Option<SessionFileSummary>,
 }
 
 impl Recorder {
@@ -54,6 +64,9 @@ impl Recorder {
             process_plan: ProcessTrackingPlan::default(),
             clock: SessionClock::default(),
             session_path: None,
+            indexed_session_count: 0,
+            last_persisted_session_path: None,
+            last_session_summary: None,
         }
     }
 
@@ -78,6 +91,9 @@ impl Recorder {
             capture_backend: StubCaptureBackend.backend_name(),
             process_backend: StubProcessBackend.backend_name(),
             session_path: self.session_path.clone(),
+            indexed_session_count: self.indexed_session_count,
+            last_persisted_session_path: self.last_persisted_session_path.clone(),
+            last_session_summary: self.last_session_summary.clone(),
         }
     }
 
@@ -124,7 +140,16 @@ impl Recorder {
 
     pub fn persist_session(&mut self, root: &Path) -> io::Result<&Path> {
         let path = self.session.write_to_root(root)?;
+        append_session_index(root, &self.session, &path)?;
+        write_last_session_pointer(root, &path)?;
         self.session_path = Some(path);
+        self.last_persisted_session_path = self.session_path.clone();
+        self.indexed_session_count = read_session_index(root)?.len();
+        self.last_session_summary = Some(SessionFileSummary {
+            session_id: self.session.session_id.clone(),
+            profile_name: self.session.profile_name.clone(),
+            event_count: self.session.events.len(),
+        });
         Ok(self
             .session_path
             .as_deref()
@@ -133,6 +158,21 @@ impl Recorder {
 
     pub fn has_session_data(&self) -> bool {
         !self.session.events.is_empty()
+    }
+
+    pub fn load_storage_state(&mut self, root: &Path) -> io::Result<()> {
+        self.indexed_session_count = read_session_index(root)?.len();
+        self.last_persisted_session_path = read_last_session_pointer(root)?;
+        self.last_session_summary = match self.last_persisted_session_path.as_deref() {
+            Some(path) => Some(read_session_file_summary(path)?),
+            None => None,
+        };
+        Ok(())
+    }
+
+    pub fn last_indexed_session(&self, root: &Path) -> io::Result<Option<SessionIndexEntry>> {
+        let mut entries = read_session_index(root)?;
+        Ok(entries.pop())
     }
 
     fn push_event(&mut self, kind: TimelineEventKind) {
@@ -199,5 +239,35 @@ mod tests {
             .expect("session persistence should succeed");
         assert!(path.to_string_lossy().contains("privacy-session-"));
         assert!(path.to_string_lossy().ends_with(".log"));
+    }
+
+    #[test]
+    fn recorder_loads_persisted_storage_state() {
+        let mut recorder = Recorder::new(AppConfig::default());
+        let root = Path::new("data/test-storage-state");
+        recorder.start().expect("start should succeed");
+        recorder
+            .persist_session(root)
+            .expect("session persistence should succeed");
+
+        let mut fresh = Recorder::new(AppConfig::default());
+        fresh
+            .load_storage_state(root)
+            .expect("storage state load should succeed");
+        let status = fresh.status_snapshot();
+
+        assert_eq!(status.indexed_session_count, 1);
+        assert!(status
+            .last_persisted_session_path
+            .expect("last session path should exist")
+            .to_string_lossy()
+            .contains("privacy-session-"));
+        assert_eq!(
+            status
+                .last_session_summary
+                .expect("last session summary should exist")
+                .profile_name,
+            "privacy"
+        );
     }
 }
