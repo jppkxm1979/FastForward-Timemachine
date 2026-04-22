@@ -1,0 +1,37 @@
+{
+  "candidate_models": [
+    "gemini-2.5-flash",
+    "gemini-2.5-flash-lite",
+    "gemini-3-flash-preview",
+    "gemini-2.5-flash-preview-09-2025",
+    "gemini-2.5-flash-lite-preview-09-2025",
+    "gemini-2.0-flash-lite"
+  ],
+  "allowed_path_prefixes": [
+    "src/",
+    "tests/"
+  ],
+  "allowed_exact_paths": [
+    "Cargo.toml",
+    "README.md"
+  ],
+  "blocked_path_prefixes": [
+    ".github/",
+    "automation/",
+    "scripts/",
+    "data/",
+    "target/"
+  ],
+  "max_changed_files": 2,
+  "max_added_lines": 120,
+  "max_removed_lines": 60,
+  "max_patch_bytes": 30000,
+  "http_retries": 3,
+  "per_model_retries": 2,
+  "model_list_timeout_seconds": 20,
+  "generation_timeout_seconds": 45,
+  "pull_request_branch": "autonomy/proposal",
+  "pull_request_label": "autonomous-evolution",
+  "minimum_pr_age_hours": 24,
+  "prompt": "\uc2dc\uc2a4\ud15c\uc5d0 \uc0c8\ub85c \ucd94\uac00\ud560\ub9cc\ud55c \uae30\ub2a5\uc774 \uc788\ub2e4\uba74 \ucd94\uac00\ud558\uc2dc\uc624. \uc57c"
+}

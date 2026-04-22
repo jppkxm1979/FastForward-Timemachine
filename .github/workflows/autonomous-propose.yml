@@ -1,0 +1,202 @@
+name: Autonomous Propose
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      force_run:
+        description: "Bypass the daily random gate"
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: autonomous-propose
+  cancel-in-progress: false
+
+jobs:
+  propose:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Rust
+        run: |
+          rustup toolchain install stable --profile minimal --component rustfmt
+          rustup default stable
+
+      - name: Load autonomy configuration
+        id: config
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("automation/autonomy.json", "r", encoding="utf-8") as handle:
+              cfg = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"proposal_branch={cfg['pull_request_branch']}\n")
+              handle.write(f"proposal_label={cfg['pull_request_label']}\n")
+          PY
+
+      - name: Detect existing autonomous PR
+        id: existing_pr
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ steps.config.outputs.proposal_branch }}';
+            const label = '${{ steps.config.outputs.proposal_label }}';
+            const { owner, repo } = context.repo;
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head: `${owner}:${branch}`,
+              per_page: 100,
+            });
+            const match = prs.find((pr) => pr.labels.some((item) => item.name === label));
+            core.setOutput('exists', match ? 'true' : 'false');
+            core.setOutput('number', match ? String(match.number) : '');
+
+      - name: Decide whether today is an evolution day
+        id: gate
+        if: steps.existing_pr.outputs.exists != 'true'
+        env:
+          FORCE_RUN: ${{ github.event_name == 'workflow_dispatch' && inputs.force_run || false }}
+        run: |
+          python3 - <<'PY'
+          import os
+          import random
+
+          forced = str(os.environ.get("FORCE_RUN", "")).lower() == "true"
+          value = random.SystemRandom().randint(1, 10)
+          should_run = forced or value == 1
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"random_value={value}\n")
+              handle.write(f"should_run={'true' if should_run else 'false'}\n")
+          PY
+
+      - name: Configure bot identity
+        if: steps.existing_pr.outputs.exists != 'true' && steps.gate.outputs.should_run == 'true'
+        run: |
+          git config user.name "autonomous-evolver[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Create fresh proposal branch from default branch
+        if: steps.existing_pr.outputs.exists != 'true' && steps.gate.outputs.should_run == 'true'
+        run: |
+          branch_name='${{ steps.config.outputs.proposal_branch }}'
+          default_branch='${{ github.event.repository.default_branch }}'
+          git fetch origin "${default_branch}"
+          git checkout -B "${branch_name}" "origin/${default_branch}"
+
+      - name: Ask Gemini for a small safe patch
+        id: generate
+        if: steps.existing_pr.outputs.exists != 'true' && steps.gate.outputs.should_run == 'true'
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          python3 scripts/ai_maintainer.py --config automation/autonomy.json
+
+      - name: Format Rust code
+        if: steps.generate.outputs.patch_applied == 'true'
+        run: cargo fmt --all
+
+      - name: Verify build and tests before proposing
+        if: steps.generate.outputs.patch_applied == 'true'
+        run: |
+          cargo check
+          cargo test --all-targets
+
+      - name: Refuse blocked path changes
+        if: steps.generate.outputs.patch_applied == 'true'
+        run: |
+          if git diff --name-only | grep -E '^(\\.github/|automation/|scripts/|data/|target/)' >/dev/null; then
+            echo "Blocked path changed after generation."
+            exit 1
+          fi
+
+      - name: Commit and push proposal branch
+        if: steps.generate.outputs.patch_applied == 'true'
+        run: |
+          if git diff --quiet; then
+            echo "No repository changes remain after verification."
+            exit 0
+          fi
+
+          branch_name='${{ steps.config.outputs.proposal_branch }}'
+          git add README.md Cargo.toml src tests 2>/dev/null || true
+          git commit -m "chore: autonomous proposal $(date -u +%F)"
+          git push --force-with-lease origin "${branch_name}"
+
+      - name: Create pull request
+        id: create_pr
+        if: steps.generate.outputs.patch_applied == 'true'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ steps.config.outputs.proposal_branch }}';
+            const label = '${{ steps.config.outputs.proposal_label }}';
+            const { owner, repo } = context.repo;
+            const base = context.payload.repository.default_branch;
+            const title = 'chore: autonomous evolution proposal';
+            const body = [
+              'Autonomous proposal generated by GitHub Actions.',
+              '',
+              '- fail-closed Gemini generation',
+              '- restricted patch paths',
+              '- pre-proposal fmt/check/test passed',
+              '- this PR is intended for delayed automatic merge only after CI remains green',
+            ].join('\n');
+
+            const pr = await github.rest.pulls.create({
+              owner,
+              repo,
+              title,
+              head: branch,
+              base,
+              body,
+              maintainer_can_modify: false,
+            });
+
+            await github.rest.issues.addLabels({
+              owner,
+              repo,
+              issue_number: pr.data.number,
+              labels: [label],
+            });
+
+            core.setOutput('number', String(pr.data.number));
+
+      - name: Write workflow summary
+        if: always()
+        run: |
+          {
+            echo "## Autonomous Propose"
+            echo ""
+            echo "- Existing PR: ${{ steps.existing_pr.outputs.exists || 'false' }}"
+            echo "- Existing PR number: ${{ steps.existing_pr.outputs.number || 'n/a' }}"
+            echo "- Random gate passed: ${{ steps.gate.outputs.should_run || 'false' }}"
+            echo "- Random gate value: ${{ steps.gate.outputs.random_value || 'n/a' }}"
+            echo "- Selected model: ${{ steps.generate.outputs.selected_model || 'n/a' }}"
+            echo "- Patch applied: ${{ steps.generate.outputs.patch_applied || 'false' }}"
+            echo "- Skip reason: ${{ steps.generate.outputs.skip_reason || 'n/a' }}"
+            echo "- Created PR: ${{ steps.create_pr.outputs.number || 'n/a' }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,120 @@
+name: Autonomous Merge
+
+on:
+  schedule:
+    - cron: "47 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: autonomous-merge
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Load autonomy configuration
+        id: config
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          with open("automation/autonomy.json", "r", encoding="utf-8") as handle:
+              cfg = json.load(handle)
+
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as handle:
+              handle.write(f"proposal_branch={cfg['pull_request_branch']}\n")
+              handle.write(f"proposal_label={cfg['pull_request_label']}\n")
+              handle.write(f"minimum_pr_age_hours={cfg['minimum_pr_age_hours']}\n")
+          PY
+
+      - name: Merge autonomous PR only if it is old enough and green
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const branch = '${{ steps.config.outputs.proposal_branch }}';
+            const label = '${{ steps.config.outputs.proposal_label }}';
+            const minAgeHours = Number('${{ steps.config.outputs.minimum_pr_age_hours }}');
+            const { owner, repo } = context.repo;
+
+            const prs = await github.paginate(github.rest.pulls.list, {
+              owner,
+              repo,
+              state: 'open',
+              head: `${owner}:${branch}`,
+              per_page: 100,
+            });
+
+            const pr = prs.find((item) => item.labels.some((tag) => tag.name === label));
+            if (!pr) {
+              core.notice('No autonomous PR is open.');
+              return;
+            }
+
+            const createdAt = new Date(pr.created_at).getTime();
+            const ageHours = (Date.now() - createdAt) / (1000 * 60 * 60);
+            if (ageHours < minAgeHours) {
+              core.notice(`PR #${pr.number} is only ${ageHours.toFixed(2)}h old; waiting.`);
+              return;
+            }
+
+            const fullPr = await github.rest.pulls.get({
+              owner,
+              repo,
+              pull_number: pr.number,
+            });
+
+            if (fullPr.data.draft) {
+              core.notice(`PR #${pr.number} is draft; waiting.`);
+              return;
+            }
+
+            if (fullPr.data.mergeable_state !== 'clean' && fullPr.data.mergeable_state !== 'has_hooks' && fullPr.data.mergeable_state !== 'unstable') {
+              core.notice(`PR #${pr.number} mergeable_state=${fullPr.data.mergeable_state}; waiting.`);
+              return;
+            }
+
+            const checks = await github.rest.checks.listForRef({
+              owner,
+              repo,
+              ref: fullPr.data.head.sha,
+            });
+
+            const badCheck = checks.data.check_runs.find((check) =>
+              check.status !== 'completed' || check.conclusion !== 'success'
+            );
+            if (badCheck) {
+              core.notice(`PR #${pr.number} has non-green check: ${badCheck.name}`);
+              return;
+            }
+
+            const statuses = await github.rest.repos.getCombinedStatusForRef({
+              owner,
+              repo,
+              ref: fullPr.data.head.sha,
+            });
+
+            if (statuses.data.state !== 'success') {
+              core.notice(`PR #${pr.number} combined status is ${statuses.data.state}; waiting.`);
+              return;
+            }
+
+            await github.rest.pulls.merge({
+              owner,
+              repo,
+              pull_number: pr.number,
+              merge_method: 'squash',
+              commit_title: `chore: autonomous evolution (${new Date().toISOString().slice(0, 10)})`,
+            });
+
+            core.notice(`PR #${pr.number} merged.`);
